@@ -3,25 +3,49 @@
 codeDir = "/Users/gcox/code/"
 
 keywords = {
-    -- a mapping of "codeword" => "app name / window title"
-    ["git"] = "Sourcetree",
-    ["code"] = "Code", -- VSCode
+    {
+        ["keyword"] = "git",
+        ["appName"] = "Sourcetree",
+        ["launch"] = function(item)
+            hs.execute("stree " .. item["folderPath"], true)
+        end,
+    },
+    {
+        ["keyword"] = "code",
+        ["appName"] = "Code", -- VSCode
+        ["launch"] = function(item)
+            hs.execute("code " .. item["folderPath"], true)
+        end,
+    },
+    {
+        ["keyword"] = "pr",
+        ["appName"] = "Pull-Request",
+        ["launch"] = function(item)
+            hs.urlevent.openURL(item["subText"])
+        end,
+        ["choices"] = function(folderName)
+            return {
+                {
+                    ["text"] = 'Create new Pull Request for "' .. folderName .. '"',
+                    ["subText"] = "https://github.com/account/" .. folderName .. "/compare",
+                    ["action"] = "new",
+                    ["folderName"] = folderName,
+                },
+                {
+                    ["text"] = 'Show existing Pull Requests for "' .. folderName .. '"',
+                    ["subText"] = "https://github.com/account/" .. folderName .. "/pulls",
+                    ["action"] = "existing",
+                    ["folderName"] = folderName,
+                }
+            }
+        end
+    }
 }
-
-function launchKeywordApp(appName, folderPath)
-    -- for these CLI commands to work, you need to enable the appropriate
-    -- CLI integration in each app
-    if appName == "Sourcetree" then
-        hs.execute("stree " .. folderPath, true)
-    elseif appName == "Code" then
-        hs.execute("code " .. folderPath, true)
-    end
-end
 
 
 log = hs.logger.new("fuzzy", "debug")
 
-function scandir(directory)
+function getSubfolderNames(directory)
     -- return all subfolders basenames of the given directory
     -- sorted in modified order desc (most recent first)
     local result = {}
@@ -41,43 +65,48 @@ function len(T)
     return count
 end
 
-
+-- setup
 _currentWindows = {}
-_codeFolders = scandir(codeDir)
+_codeFolders = getSubfolderNames(codeDir)
 _windowChooser = nil
 _lastFocusedWindow = nil
+_keywordsIndexed = {}
+for i, kw in pairs(keywords) do
+    _keywordsIndexed[kw["keyword"]] = kw
+end
 
 
-function _filterWindows(query)
+function _queryChanged(query)
     searchInWindows = _currentWindows
     queryWords = string.gmatch(query:lower(), "%S+")
     nonKeywords = {}
 
     -- if the query includes one of these keywords, then restrict the choices to that app
     -- and ensure we have options to launch a new window in that app
-    createWindowInApp = nil
+    keywordApp = nil
 
     for word in queryWords do
-        if keywords[word] then
+        if _keywordsIndexed[word] then
             -- only allow choices of windows from this app
-            restrictAppname = keywords[word]
+            restrictApp = _keywordsIndexed[word]
             filtered = {}
             for i, win in pairs(searchInWindows) do
-                if win["appName"] == restrictAppname then
+                if win["appName"] == restrictApp["appName"] then
                     table.insert(filtered, win)
                 end
             end
             searchInWindows = filtered
 
             -- offer to load code paths in this app
-            createWindowInApp = restrictAppname
+            keywordApp = restrictApp
         else
+            -- this is not a keyword, use it for filtering windows and codebases
             table.insert(nonKeywords, word)
         end
     end
     -- log.d("_filterChoices nonKeywords:", nonKeywords)
 
-    -- now filter possible windows by the non-keywords
+    -- now filter possible windows
     for i, word in pairs(nonKeywords) do
         filtered = {}
         for i, win in pairs(searchInWindows) do
@@ -93,8 +122,8 @@ function _filterWindows(query)
     -- so rename the variable
     newChooserOptions = searchInWindows
 
-    -- if a specific app has been chosen via keyword, offer to open any matching folders in there too
-    if (createWindowInApp ~= nil and len(nonKeywords) > 0) then
+    -- if any of the non-keywords match code folders, offer to load them in our keyword apps
+    if len(nonKeywords) > 0 then
 
         -- find code folders that matches the search terms
         matchingCodeFolders = _codeFolders
@@ -110,17 +139,41 @@ function _filterWindows(query)
         end
 
         if matchingCodeFolders ~= nil then
-            -- add chooser options to launch these folders in the chosen app
+            -- add chooser options to launch these folders in apps
+            if keywordApp ~= nil then
+                -- show option to launch in just this app
+                launchInApps = { [""] = keywordApp }
+            else
+                -- show options to launch in all keyword apps
+                launchInApps = keywords
+            end
 
-            for i, folderName in pairs(matchingCodeFolders) do
-                item = {
-                    ["type"] = "keyword",
-                    ["text"] = 'Open "' .. folderName .. '" with ' .. createWindowInApp,
-                    ["subText"] = codeDir .. folderName,
-                    ["appName"] = createWindowInApp,
-                    ["folderPath"] = codeDir .. folderName,
-                }
-                table.insert(newChooserOptions, item)
+            for i, app in pairs(launchInApps) do
+                for j, folderName in pairs(matchingCodeFolders) do
+                    if app["choices"] then
+                        -- this app implements custom choices
+                        choices = app["choices"](folderName)
+                        for i, choice in pairs(choices) do
+                            -- ensure these choices have the required props
+                            choice["type"] = "keyword"
+                            choice["keyword"] = app["keyword"]
+                            table.insert(newChooserOptions, choice)
+                        end
+
+                    else
+                        -- use the default choice
+                        item = {
+                            ["type"] = "keyword",
+                            ["keyword"] = app["keyword"],
+                            ["text"] = 'Open "' .. folderName .. '" with ' .. app["appName"],
+                            ["subText"] = codeDir .. folderName,
+                            -- any props the custom app launcher may want
+                            ["folderPath"] = codeDir .. folderName,
+                            ["folderName"] = folderName,
+                        }
+                        table.insert(newChooserOptions, item)
+                    end
+                end
             end
         end
     end
@@ -144,7 +197,8 @@ function _optionChosen(item)
         window:focus()
 
     elseif item["type"] == "keyword" then
-        launchKeywordApp(item["appName"], item["folderPath"])
+        app = _keywordsIndexed[item["keyword"]]
+        app["launch"](item)
     end
 end
 
@@ -176,7 +230,7 @@ function appSwitcher()
     if _windowChooser == nil then
         _windowChooser = hs.chooser.new(_optionChosen)
             :choices(_currentWindows)
-            :queryChangedCallback(_filterWindows)
+            :queryChangedCallback(_queryChanged)
             :searchSubText(true)
     end
     _windowChooser:query(""):show()
