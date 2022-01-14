@@ -22,9 +22,13 @@ end
 log = hs.logger.new("fuzzy", "debug")
 
 function scandir(directory)
+    -- return all subfolders basenames of the given directory
+    -- sorted in modified order desc (most recent first)
     local result = {}
-    local folders = io.popen("cd " .. codeDir .. " && find . -maxdepth 1 -type d | cut -c3-")
+    local folders = io.popen("cd " .. codeDir .. " && ls -ldt1 */")
     for filename in folders:lines() do
+        -- trim the trailing slash
+        filename = filename:sub(1, -2)
         table.insert(result, filename)
     end
     folders:close()
